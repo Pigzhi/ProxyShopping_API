@@ -1,0 +1,6 @@
+@API大專_HostAddress = http://localhost:5221
+
+GET {{API大專_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
