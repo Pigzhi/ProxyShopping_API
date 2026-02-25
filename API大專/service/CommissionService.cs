@@ -39,6 +39,10 @@ namespace API大專.service
                                    .FirstOrDefaultAsync(u => u.Uid == userId);
                 if (user == null)
                     return (false, "使用者不存在");
+                if (user.DisabledUntil != null && user.DisabledUntil > DateTime.Now)
+                {
+                    return (false, $"帳號已被停權至 {user.DisabledUntil:yyyy/MM/dd HH:mm}");
+                }
 
 
 
@@ -84,6 +88,7 @@ namespace API大專.service
                     newDiff["Location "] = dto.Location;
                 }
 
+                var oldBalance = user.Balance;
                 var oldEscrow = Commission.EscrowAmount;
 
                 //金額被修改 ->重算
@@ -93,12 +98,9 @@ namespace API大專.service
                                                     , 0, MidpointRounding.AwayFromZero);
 
                 var diff = newtotal - oldEscrow; //金額差異
-                if (diff > 0 && user.Balance < diff)
-                {
-                    return (false, "錢包餘額不足，金額變更失敗");
-                }
-                user.Balance -= diff;   //diff是多的就是 錢包-diff ， 改便宜 diff變-的 就是 錢包-(-diff);
-
+                
+                
+               
                 Commission.Title = dto.Title;
                 Commission.Description = dto.Description;
                 Commission.Price = dto.Price;
@@ -160,7 +162,41 @@ namespace API大專.service
                     _ProxyContext.CommissionHistories.Add(history);
                 }
 
-
+                if (diff > 0)
+                {
+                    if (user.Balance < diff)
+                    {
+                        return (false, "錢包餘額不足，金額變更失敗");
+                    }
+                    user.Balance -= diff;
+                    var log = new BalanceLog
+                    {
+                        UserId = user.Uid,
+                        Action = "EditSpend",  //deposit：儲值  spend：支出（下委託）  refund：退款    withdraw：提領 
+                        Amount = diff,
+                        BeforeBalance = oldBalance,
+                        AfterBalance = user.Balance, //order這次訂單廚的金額
+                        RefType = "Commission",  //儲值:deposit 對應refid :order_id     委託:對應commission的 commission_id  
+                        RefId = Commission.CommissionId
+                    };
+                    _ProxyContext.BalanceLogs.Add(log);
+                }
+                else if (diff < 0)
+                {
+                    var refund = Math.Abs(diff); //絕對值不存負數                    
+                    user.Balance += refund;
+                    var log = new BalanceLog
+                    {
+                        UserId = user.Uid,
+                        Action = "EditRefund",  //deposit：儲值  spend：支出（下委託）  refund：退款    withdraw：提領 
+                        Amount = refund,
+                        BeforeBalance = oldBalance,
+                        AfterBalance = user.Balance, //order這次訂單廚的金額
+                        RefType = "Commission",  //儲值:deposit 對應refid :order_id     委託:對應commission的 commission_id  
+                        RefId = Commission.CommissionId
+                    };
+                    _ProxyContext.BalanceLogs.Add(log);
+                }
 
 
                 await _ProxyContext.SaveChangesAsync();

@@ -1,7 +1,8 @@
-﻿using Microsoft.AspNetCore.Mvc;
-using API大專.DTO;
+﻿using API大專.DTO;
 using API大專.Models;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.Json;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
@@ -9,7 +10,7 @@ using System.Text.Json;
 namespace API大專.Controllers
 {
     [ApiController]
-    [Route("api/Manage")]
+    [Route("Manage")]
     public class UserManageCommissionController : ControllerBase
     {
         private readonly ProxyContext _proxyContext;
@@ -17,11 +18,12 @@ namespace API大專.Controllers
         {
             _proxyContext = proxyContext;
         }
+        //管理委託畫面，我建立的委託
+        [Authorize]
         [HttpGet("Commission")]
-        public async Task<IActionResult> UserManage(string userid)
+        public async Task<IActionResult> UserManage()
         {
-            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier)
-                     ?? "101";// 接單者
+            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
             if (string.IsNullOrEmpty(userId))
             {
                 return Unauthorized("尚未登入");
@@ -35,12 +37,12 @@ namespace API大專.Controllers
                                 Status = c.Status,
                                 Quantity = c.Quantity,
                                 Price = c.Price,
-                                TotalAmount = (c.Price * c.Quantity )+ c.Fee,
+                                TotalAmount = (c.Price * c.Quantity) + c.Fee,
                                 CreatedAt = c.CreatedAt,
                                 EndAt = c.Deadline,
                                 ImageUrl = c.ImageUrl,
 
-                                CanEdit = c.Status == "審核中" || c.Status=="審核失敗",
+                                CanEdit = c.Status == "審核中" || c.Status == "審核失敗",
                                 CanViewDetail = c.Status == "已出貨",
                                 CanViewShipping = c.Status == "已寄出"
                             }).ToListAsync();
@@ -52,12 +54,12 @@ namespace API大專.Controllers
 
 
         }
-
-            [HttpGet("Commission/MyAceipt")]
+        //我接受的委託
+        [Authorize]
+        [HttpGet("Commission/MyAceipt")]
             public async Task<IActionResult> AceiptManage()
             {
-                var userId = User.FindFirstValue(ClaimTypes.NameIdentifier)
-                         ?? "102";// 接單者
+                var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);// 接單者
                 if (string.IsNullOrEmpty(userId))
                 {
                     return Unauthorized("尚未登入");

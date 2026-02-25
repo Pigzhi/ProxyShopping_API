@@ -20,4 +20,6 @@ public partial class CommissionShipping
     public string? TrackingNumber { get; set; }
 
     public string? Remark { get; set; }
+
+    public virtual Commission Commission { get; set; } = null!;
 }

@@ -1,19 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.ComponentModel.DataAnnotations;
-using System.ComponentModel.DataAnnotations.Schema;
 
 namespace API大專.Models;
 
 public partial class Commission
 {
-    [Key]
-    [Column("commission_id")]
     public int CommissionId { get; set; }
-    [Column("service_code")]
-    public string ServiceCode { get; set; } = null!;
 
-    [Column("creator_id")]
     public string? CreatorId { get; set; }
 
     public string? Title { get; set; }
@@ -36,18 +29,21 @@ public partial class Commission
 
     public string Status { get; set; } = null!;
 
-    [Column("escrowAmount")]
     public decimal EscrowAmount { get; set; }
 
     public decimal Fee { get; set; }
 
-    public int? FailCount { get; set; }
-
     public DateTime? UpdatedAt { get; set; }
+
+    public string ServiceCode { get; set; } = null!;
 
     public virtual ICollection<CommissionHistory> CommissionHistories { get; set; } = new List<CommissionHistory>();
 
     public virtual ICollection<CommissionOrder> CommissionOrders { get; set; } = new List<CommissionOrder>();
+
+    public virtual ICollection<CommissionReceipt> CommissionReceipts { get; set; } = new List<CommissionReceipt>();
+
+    public virtual ICollection<CommissionShipping> CommissionShippings { get; set; } = new List<CommissionShipping>();
 
     public virtual User? Creator { get; set; }
 }

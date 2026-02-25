@@ -1,9 +1,12 @@
 ﻿using API大專.DTO;
 using API大專.Models;
 using API大專.service;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using System.Linq.Expressions;
 using System.Security.Claims;
 using System.Text.Json;
 
@@ -15,14 +18,17 @@ namespace API.Controllers
         private readonly ProxyContext _proxyContext;
         private readonly CommissionService _CommissionService;
         private readonly CreateCommissionCode _CreateCode;
-        public CommissionProcessController(ProxyContext proxyContext, CommissionService commissionService, CreateCommissionCode CreateCode)
+        private readonly IConfiguration _configuration;
+        public CommissionProcessController(ProxyContext proxyContext, CommissionService commissionService, CreateCommissionCode CreateCode,IConfiguration configuration)
         {
             _proxyContext = proxyContext;
             _CommissionService = commissionService;
             _CreateCode = CreateCode;
+            _configuration = configuration;
         }
 
         //新增委託 -> 錢包確認 扣款
+        [Authorize]
         [HttpPost("Create")]
         public async Task<IActionResult> CreateCommission([FromForm] CommissionCreateDto dto)
         {
@@ -39,12 +45,19 @@ namespace API.Controllers
                 });
             }
             // 取得目前登入id
-            var userid = "101";
-            //var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value; // 如果是 JWT / Session用這個
+            //var userid = "101";
+            var userid = User.FindFirstValue(ClaimTypes.NameIdentifier) ;
             var user = await _proxyContext.Users
-    .FirstOrDefaultAsync(u => u.Uid == userid);
-
-
+                               .FirstOrDefaultAsync(u => u.Uid == userid);
+            if (user.DisabledUntil != null && user.DisabledUntil >DateTime.Now ) 
+            {
+                return BadRequest(new
+                {
+                    success = false,
+                    code = "USER_DISABLED",
+                    message = $"帳號已被停權至 {user.DisabledUntil:yyyy/MM/dd HH:mm}"
+                });
+            }
             if (user == null)
             {
                 return Unauthorized(new { success = false, message = "請先登入！" });
@@ -54,7 +67,6 @@ namespace API.Controllers
             decimal Pricefee = (dto.Price * dto.Quantity) * fee; //平台手續費
             decimal TotalPrice = Math.Round((dto.Price * dto.Quantity) + Pricefee,
                                                     0, MidpointRounding.AwayFromZero);
-
             //判斷錢包
             if (user.Balance < TotalPrice)
             {
@@ -69,7 +81,6 @@ namespace API.Controllers
             using var transaction = await _proxyContext.Database.BeginTransactionAsync();
             try
             {
-                user.Balance -= TotalPrice;
 
                 //圖片上傳
                 string? imageUrl = null;
@@ -107,7 +118,21 @@ namespace API.Controllers
 
                 _proxyContext.Commissions.Add(Commission);
                 await _proxyContext.SaveChangesAsync();
-
+                
+                decimal? oldBalance = user.Balance;         
+                user.Balance -= TotalPrice;
+                var log = new BalanceLog
+                {
+                    UserId = user.Uid,
+                    Action = "Spend",  //deposit：儲值  spend：支出（下委託）  refund：退款    withdraw：提領 
+                    Amount = TotalPrice,
+                    BeforeBalance = oldBalance,
+                    AfterBalance = oldBalance - TotalPrice, //order這次訂單廚的金額
+                    RefType = "Commission",  //儲值:deposit 對應refid :order_id     委託:對應commission的 commission_id  
+                    RefId = Commission.CommissionId
+                };
+                _proxyContext.BalanceLogs.Add(log);
+                await _proxyContext.SaveChangesAsync();
                 // 記錄歷史
                 var jsonOptions = new JsonSerializerOptions
                 {
@@ -193,6 +218,7 @@ namespace API.Controllers
 
 
         //編輯委託
+        [Authorize]
         [HttpPut("{ServiceCode}/Edit")]
         public async Task<IActionResult> EditCommission(string ServiceCode, [FromForm] CommissionEditDto dto)
         {
@@ -218,13 +244,10 @@ namespace API.Controllers
                 });
             }
 
-
-            //id = 11; //模擬Commission id
-            // 模擬user  之後要改session
-            var userid = "101";
+            var userid = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
             var (success, message) = await _CommissionService
-                                                         .EditCommissionAsync(commissionId, userid, dto);
+                                      .EditCommissionAsync(commissionId, userid, dto);
             if (!success)
             {
                 return BadRequest(new
@@ -242,11 +265,11 @@ namespace API.Controllers
         }
 
         //接受委託
+        [Authorize]
         [HttpPost("{ServiceCode}/accept")]
         public async Task<IActionResult> acceptCommission(string ServiceCode)
         {
-            var userid = "102";
-            //var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier).Value);
+            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
             using var transaction = await _proxyContext.Database.BeginTransactionAsync();
             try
@@ -261,14 +284,12 @@ namespace API.Controllers
                                     c.Status
                                 }).FirstOrDefaultAsync();
 
-                if (commission == null || commission.Status != "待接單")
-                {
-                    return BadRequest(new
-                    {
-                        success = false,
-                        message = "訂單不存在或無法接單"
-                    });
-                }
+                // 2. 第一道防線：初步檢查 
+                if (commission == null) return NotFound("找不到該委託");
+                if (commission.Status != "待接單") return BadRequest("此委託已被接取或已關閉");
+
+                // 3. 第二道防線：身分檢查 (防止自己接自己)
+                if (commission.CreatorId == userId) return BadRequest("您不能接取自己發布的委託");
 
 
                 var affected = await _proxyContext.Database.ExecuteSqlRawAsync(@"
@@ -278,19 +299,22 @@ namespace API.Controllers
                           WHERE 
                           commission_id = @id
                           AND status = '待接單'
-                          AND creator_id <> @userId
                             ",
                     new SqlParameter("@id", commission.CommissionId),
-                    new SqlParameter("@userId", userid)
+                    new SqlParameter("@userId", userId)
                     );
 
                 if (affected == 0)
                 {
                     await transaction.RollbackAsync();
+                    if (commission.CreatorId == userId)
+                    {
+                        return BadRequest(new { success = false, message = "不可接取自己的委託" });
+                    }
                     return BadRequest(new
                     {
                         success = false,
-                        message = "訂單已被接取或無法接單"
+                        message = "訂單已被接取或狀態已改變"
                     });
                 }
                 var newDiff = new Dictionary<string, object>();
@@ -298,7 +322,7 @@ namespace API.Controllers
                 var order = new CommissionOrder
                 {
                     CommissionId = commission.CommissionId,
-                    SellerId = userid,
+                    SellerId = userId,
                     BuyerId = commission.CreatorId,
                     Status = "PENDING", //未完成
                     Amount = commission.EscrowAmount,
@@ -316,7 +340,7 @@ namespace API.Controllers
                 {
                     CommissionId = commission.CommissionId,
                     Action = "ACCEPT",
-                    ChangedBy = userid,
+                    ChangedBy = userId,
                     ChangedAt = DateTime.Now,
                     OldData = JsonSerializer.Serialize(oldDiff, jsonOptions),
                     NewData = JsonSerializer.Serialize(newDiff, jsonOptions)
@@ -361,11 +385,12 @@ namespace API.Controllers
 
 
         //上傳明細
+        [Authorize]
         [HttpPost("{ServiceCode}/receipt")]
         public async Task<IActionResult> UploadReceipt(string ServiceCode, [FromForm] UploadReceiptDto dto)
         {
-            var userId = User?.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                        ?? "102";// 接單者
+            var userId = User?.FindFirstValue(ClaimTypes.NameIdentifier);
+                        
             var commissionId = await _proxyContext.Commissions
                                                  .Where(c => c.ServiceCode == ServiceCode)
                                                  .Select(c => c.CommissionId)
@@ -477,11 +502,12 @@ namespace API.Controllers
 
 
         //寄貨後按鈕
+        [Authorize]
         [HttpPost("{ServiceCode}/ship")]
         public async Task<IActionResult> ShipCommission(string ServiceCode, [FromBody] CommissionShipDto dto)
         {
-            var userId = User?.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                         ?? "102"; // Swagger 測試用
+            var userId = User?.FindFirstValue(ClaimTypes.NameIdentifier);
+                         
             var commissionId = await _proxyContext.Commissions
                                                 .Where(c => c.ServiceCode == ServiceCode)
                                                 .Select(c => c.CommissionId)
@@ -598,84 +624,95 @@ namespace API.Controllers
         }
 
         //完成訂單 (買家)
+        [Authorize]
         [HttpPost("{ServiceCode}/complete")]
         public async Task<IActionResult> CompleteCommission(string ServiceCode)
         {
-            var userId = User?.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? "101";
+            var userId = User?.FindFirstValue(ClaimTypes.NameIdentifier);
 
             using var tx = await _proxyContext.Database.BeginTransactionAsync();
-
-            var commission = await _proxyContext.Commissions
-                .FirstOrDefaultAsync(c => c.ServiceCode == ServiceCode);
-
-            if (commission == null)
-                return NotFound("委託不存在");
-
-            if (commission.CreatorId != userId)
-                return Forbid("你不是此委託的建立者");
-
-            if (commission.Status != "已寄出")
-                return BadRequest("目前狀態不可完成");
-
-            var order = await _proxyContext.CommissionOrders
-                .FirstOrDefaultAsync(o => o.CommissionId == commission.CommissionId);
-
-            if (order == null || order.Status != "PENDING")
-                return BadRequest("訂單紀錄不存在或訂單尚未完成寄貨");
-
-            var oldStatus = commission.Status; //已寄出 狀態紀錄
-            var paymentInfo = new
+            try
             {
-                orderAmount = order.Amount,
-                fee = commission.Fee,
-                releaseToSeller = order.Amount - commission.Fee
-            };
+                var commission = await _proxyContext.Commissions
+                    .FirstOrDefaultAsync(c => c.ServiceCode == ServiceCode);
 
-            // 狀態更新
-            commission.Status = "已完成";
-            commission.UpdatedAt = DateTime.Now;
-            order.Status = "COMPLETED";
-            order.FinishedAt = DateTime.Now;
+                if (commission == null)
+                    return NotFound("委託不存在");
 
-            // 金流
-            var paymentService = new CommissionPaymentService(_proxyContext);
-            await paymentService.ReleaseToSellerAsync(commission.CommissionId);
+                if (commission.CreatorId != userId)
+                    return Forbid("你不是此委託的建立者");
 
-            // History
-            var oldDiff = new Dictionary<string, object>();
-            var newDiff = new Dictionary<string, object>();
-            if (oldStatus != commission.Status)
-            {
-                oldDiff["status"] = oldStatus;
-                newDiff["status"] = commission.Status;
-            }
-            newDiff["payment"] = paymentInfo;
+                if (commission.Status != "已寄出")
+                    return BadRequest("目前狀態不可完成");
 
+                var order = await _proxyContext.CommissionOrders
+                    .FirstOrDefaultAsync(o => o.CommissionId == commission.CommissionId);
 
+                if (order == null || order.Status != "PENDING")
+                    return BadRequest("訂單紀錄不存在或訂單尚未完成寄貨");
 
-            var jsonOptions = new JsonSerializerOptions
-            {
-                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            };
-            if (oldDiff.Any())
-            {
-                _proxyContext.CommissionHistories.Add(new CommissionHistory
+                var oldStatus = commission.Status; //已寄出 狀態紀錄
+                var paymentInfo = new
                 {
-                    CommissionId = commission.CommissionId,
-                    Action = "COMPLETE_COMMISSION",
-                    ChangedBy = userId,
-                    OldData = JsonSerializer.Serialize(oldDiff, jsonOptions),
-                    NewData = JsonSerializer.Serialize(newDiff, jsonOptions)
-                });
-            }
-            await _proxyContext.SaveChangesAsync();
-            await tx.CommitAsync();
+                    orderAmount = order.Amount,
+                    fee = commission.Fee,
+                    releaseToSeller = order.Amount - commission.Fee
+                };
 
-            return Ok(new { success = true, message = "訂單已完成" });
+                // 狀態更新
+                commission.Status = "已完成";
+                commission.UpdatedAt = DateTime.Now;
+                order.Status = "COMPLETED";
+                order.FinishedAt = DateTime.Now;
+
+                // 金流
+                var paymentService = new CommissionPaymentService(_proxyContext, _configuration);
+                await paymentService.ReleaseToSellerAsync(commission.CommissionId);
+
+                
+
+                // History
+                var oldDiff = new Dictionary<string, object>();
+                var newDiff = new Dictionary<string, object>();
+                if (oldStatus != commission.Status)
+                {
+                    oldDiff["status"] = oldStatus;
+                    newDiff["status"] = commission.Status;
+                }
+                newDiff["payment"] = paymentInfo;
+
+
+
+                var jsonOptions = new JsonSerializerOptions
+                {
+                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                };
+                if (oldDiff.Any())
+                {
+                    _proxyContext.CommissionHistories.Add(new CommissionHistory
+                    {
+                        CommissionId = commission.CommissionId,
+                        Action = "COMPLETE_COMMISSION",
+                        ChangedBy = userId,
+                        OldData = JsonSerializer.Serialize(oldDiff, jsonOptions),
+                        NewData = JsonSerializer.Serialize(newDiff, jsonOptions)
+                    });
+                }
+                await _proxyContext.SaveChangesAsync();
+                await tx.CommitAsync();
+
+                return Ok(new { success = true, message = "訂單已完成，款項已撥付給賣家" });
+            }
+            catch (Exception ex)
+            {
+                await tx.RollbackAsync();
+                return BadRequest(new { success = false, message = "撥款失敗: " + ex.Message });
+            }
         }
 
 
         //商品瑕疵 取消 委託人必須退貨給 接委託人(承擔成本)
+        [Authorize]
         [HttpPost("{ServiceCode}/cancel")]
         public async Task<IActionResult> CancelCommission(string ServiceCode, [FromBody] CommissionCancelDto dto)
         {
@@ -716,7 +753,7 @@ namespace API.Controllers
             order.FinishedAt = DateTime.Now;
 
             // 退款
-            var paymentService = new CommissionPaymentService(_proxyContext);
+            var paymentService = new CommissionPaymentService(_proxyContext, _configuration);
             await paymentService.RefundToBuyerAsync(commission.CommissionId);
 
             // History

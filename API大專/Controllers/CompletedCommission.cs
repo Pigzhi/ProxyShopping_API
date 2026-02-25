@@ -11,7 +11,7 @@ using System.Text.Json;
 namespace API大專.Controllers
 {
     [ApiController]
-    [Route("api/Commissions")]
+    [Route("Commissions")]
     public class CompletedCommission : Controller
     {
         private readonly ProxyContext _proxyContext;
@@ -21,13 +21,13 @@ namespace API大專.Controllers
         }
 
         // 登入的user自己 建立的委託 完成 跟 接受委託 完成 都顯示
-        //[Authorize]
+        [Authorize]
         [HttpGet("MyCompleted")]
-        public async Task<ActionResult> GetCompletedOrder([FromQuery] string userId)
+        public async Task<ActionResult> GetCompletedOrder()
         {
-            // var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+             var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
-            if (string.IsNullOrEmpty(userId))
+            if (string.IsNullOrEmpty(currentUserId))
             {
                 return Unauthorized(new
                 {
@@ -43,8 +43,8 @@ namespace API大專.Controllers
                         on o.BuyerId equals buyerUser.Uid
                         join sellerUser in _proxyContext.Users
                         on o.SellerId equals sellerUser.Uid
-                        where o.Status == "COMPLETED" || o.Status == "CANCELLED"
-                        && (o.BuyerId == userId || o.SellerId ==userId)
+                        where( o.Status == "COMPLETED" || o.Status == "CANCELLED")
+                        && (o.BuyerId == currentUserId || o.SellerId == currentUserId)
                         select new
                         {
                             title = c.Title,

@@ -20,4 +20,6 @@ public partial class CommissionReceipt
     public DateTime UploadedAt { get; set; }
 
     public string? Remark { get; set; }
+
+    public virtual Commission Commission { get; set; } = null!;
 }
